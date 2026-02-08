@@ -1,5 +1,12 @@
 import {getPrismaClient} from "../src/prisma/Primsa";
 import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc";
+import timezone from "dayjs/plugin/timezone";
+import * as fs from "node:fs/promises";
+import {FileHandle} from "node:fs/promises";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const smsGsmCharacters =
 	" @ΔSP0¡P¿p£_!1AQaq$Φ\"2BRbr¥Γ#3CScsèΛ¤4DTdtéΩ%5EUeuùΠ&6FVfvìΨ'7GWgwòΣ(8HXhxÇΘ)9IYiy\nΞ*:JZjzØ\f\x1B;KÄkäøÆ,<LÖlö\ræ-=MÑmñÅß.>NÜnüåÉ/?O§oà|^€{}[~]\\";
@@ -26,6 +33,7 @@ const hasBackTickCharacter = (value: string | undefined | null): boolean => {
 	return localValue.includes("\u2019");
 };
 
+/*
 const prismaClient = await getPrismaClient();
 
 const templates = await prismaClient.marketing_SMSMessages.findMany({});
@@ -35,7 +43,6 @@ const filteredTemplates = templates.filter(template =>
 console.log(templates);
 console.log(filteredTemplates);
 
-/*
 for (const template of filteredTemplates) {
 	await prismaClient.marketing_SMSMessages.update({
 		where: {
@@ -63,10 +70,54 @@ const customers = await prismaClient.customers.findMany({
 console.log(customers);
 */
 
-/*
+const tenantIds = [
+	"org_zjoLqb3Bk8bWIeAx",
+	"org_ZHcvdozM0vofm65c",
+	"org_SpgN28ViN9vutxVV",
+	"org_tQ90wyx3CxYzLqtR",
+	"org_RBQMf8HftxQV5Ies",
+];
+
+const prismaClient = await getPrismaClient();
+
+const tenants = await prismaClient.tenants.findMany({
+	where: {
+		id: {
+			in: tenantIds,
+		},
+	},
+	select: {id: true, displayName: true},
+});
+
+const locations = await prismaClient.location.findMany({
+	where: {
+		tenant: {
+			in: tenantIds,
+		},
+	},
+	select: {id: true, name: true},
+});
+
+const customers = await prismaClient.customers.findMany({
+	where: {
+		tenant: {
+			in: tenantIds,
+		},
+	},
+	select: {
+		id: true,
+		given: true,
+		surname: true,
+		email: true,
+		locationId: true,
+	},
+});
+
 const smses = await prismaClient.communications_SMS.findMany({
 	where: {
-		tenant: "org_ztOE9MVW6X8MhzPF",
+		tenant: {
+			in: tenantIds,
+		},
 		isInbound: false,
 		sendPending: false,
 	},
@@ -76,21 +127,60 @@ const smses = await prismaClient.communications_SMS.findMany({
 		sentFrom: true,
 		sentTo: true,
 		customerId: true,
+		locationId: true,
 		content: true,
 		billingUnits: true,
 		timestamp: true,
 	},
 });
 
-console.log(
-	`"SMS ID","Tenant","Sent From","Sent To","Customer ID","Content","Billing Units","Timestamp"`,
-);
-for (const sms of smses) {
-	console.log(
-		`"${escapeCsv(sms.id)}","${escapeCsv(sms.tenant)}","${escapeCsv(sms.sentFrom)}","${escapeCsv(sms.sentTo)}","${escapeCsv(sms.customerId)}","${escapeCsv(sms.content)}","${sms.billingUnits}","${escapeCsv(sms.timestamp.toLocaleDateString() + " " + sms.timestamp.toLocaleTimeString())}"`,
+let fileHandle: FileHandle | undefined;
+try {
+	const fileHandle = await fs.open("/tmp/sms_emails_summary_3.csv", "w");
+
+	await fileHandle.write(
+		`"SMS ID","Tenant ID","Tenant Name","Sent From","Sent To","Customer ID","Customer Name","Customer Email","Location ID","Location Name","Content","Billing Units","Timestamp","Has Non GSM Characters","Has Backtick Character"\n`,
 	);
+	await fileHandle.sync();
+
+	let count = 0;
+	for (const sms of smses) {
+		const tenantName = tenants.find(
+			tenant => tenant.id === sms.tenant,
+		)?.displayName;
+
+		let locationId = sms.locationId;
+		let locationName: string | undefined = undefined;
+
+		const customer = customers.find(customer => customer.id === sms.customerId);
+
+		if (!locationId && customer?.locationId) {
+			locationId = customer?.locationId;
+		}
+
+		if (locationId) {
+			locationName = locations.find(location => location.id === locationId)?.name;
+		}
+
+		await fileHandle.write(
+			`"${escapeCsv(sms.id)}","${escapeCsv(sms.tenant)}","${tenantName ?? ""}","${escapeCsv(sms.sentFrom)}","${escapeCsv(sms.sentTo)}","${escapeCsv(customer?.id ?? "")}","${escapeCsv(customer ? customer.given + " " + customer.surname : "")}","${escapeCsv(customer?.email ?? "")}","${escapeCsv(locationId ?? "")}","${escapeCsv(locationName ?? "")}","${escapeCsv(sms.content)}","${sms.billingUnits}","${escapeCsv(sms.timestamp.toISOString())}","${hasNonGsmCharacters(sms.content) ? "TRUE" : "FALSE"}","${hasBackTickCharacter(sms.content) ? "TRUE" : "FALSE"}"\n`,
+		);
+
+		if (count % 100 == 0) {
+			console.log(`Processing: ${((count / smses.length) * 100).toFixed(2)}%`);
+			await fileHandle.sync();
+		}
+
+		++count;
+	}
+} finally {
+	if (fileHandle) {
+		await fileHandle.sync();
+		await fileHandle.close();
+	}
 }
 
+console.log(`Processing: 100%`);
 /*
 const claims1 = await prismaClient.medicare_BulkBillClaim.findMany({
 	where: {
